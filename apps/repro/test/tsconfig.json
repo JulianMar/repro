@@ -1,0 +1,4 @@
+{
+  "extends": "./.nuxt/tsconfig.json",
+  "exclude": ["**/*.stories.ts", "**/*.stories.js", "**/*.spec.ts"]
+}

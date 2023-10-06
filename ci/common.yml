@@ -1,0 +1,81 @@
+.checkAffected:
+  script:
+    - exit_code=0
+    - cat affected-apps.txt | grep -q $CLIENT || exit_code=$?
+    - |-
+      if [ $exit_code -eq 1 ]; then
+        echo "✔️ no deploy needed!"
+        exit 0
+      fi
+
+.distributed:
+  tags:
+    - build
+  interruptible: true
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  artifacts:
+    paths:
+      - node_modules/.cache/nx
+
+.dockerBase:
+  cache: []
+  image: gitlab.russmedia.com:5050/devv/ci-templates-gitlab/dockerindocker:latest
+  services:
+    - name: gitlab.russmedia.com:5050/devv/ci-templates-gitlab/docker:dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ''
+  extends: .distributed
+  artifacts:
+    paths:
+      - dist
+      - affected-apps.txt
+      - node_modules/.cache/nx
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  tags:
+    - build
+  stage: build
+  interruptible: true
+
+.deploy:
+  cache: []
+  image: gitlab.russmedia.com:5050/devv/ci-templates-gitlab/dockerindocker-oc:latest
+  services:
+    - name: gitlab.russmedia.com:5050/devv/ci-templates-gitlab/docker:dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ''
+    DEPLOYMENT_PATH: .deployment/$APP/production
+    IMAGE_TAG: gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT-master:$CI_COMMIT_SHORT_SHA
+    DEPLOYMENT_NAME: frontend
+  interruptible: true
+  artifacts:
+    when: always
+    paths:
+      - affected-apps.txt
+      - kustomize.yaml
+      - apply-result.yaml
+    expire_in: 1 day
+  tags:
+    - deploy
+  stage: deploy
+  before_script:
+    - oc login --token="$OKD_TOKEN" --server="$OKD_SERVER" --insecure-skip-tls-verify
+    - oc project $PROJECT
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - !reference [.checkAffected, script]
+
+    - mkdir -p ci-templates-gitlab
+    - cp -r /deployment ci-templates-gitlab/
+    - cp -r /templates ci-templates-gitlab/
+
+    - kustomize build ./${DEPLOYMENT_PATH} | envsubst > kustomize.yaml
+    - oc apply --wait=true -f kustomize.yaml > apply-result.yaml
+    # wait for deployment to finish
+    - for app in $(cat apply-result.yaml | awk '/deployment/ {print $1}'); do echo "waiting for $app" && oc wait $app --for condition=available --timeout=300s ; done

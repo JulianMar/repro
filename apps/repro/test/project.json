@@ -1,0 +1,75 @@
+{
+  "name": "repro-test",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/repro/test",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/repro/test"],
+      "options": {
+        "command": "nuxt build apps/repro/test"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "nuxt dev apps/repro/test"
+      }
+    },
+    "prepare": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "nuxt prepare apps/repro/test"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest --dir apps/repro/test -r apps/repro/test"
+      }
+    },
+    "storybook": {
+      "executor": "@nx/storybook:storybook",
+      "options": {
+        "port": 4409,
+        "configDir": "apps/repro/test/.storybook"
+      },
+      "configurations": {
+        "ci": {
+          "quiet": true
+        }
+      }
+    },
+    "build-storybook": {
+      "executor": "@nx/storybook:build",
+      "outputs": ["{workspaceRoot}/dist/storybook/apps/repro/test"],
+      "options": {
+        "outputDir": "{workspaceRoot}/dist/storybook/apps/repro/test",
+        "configDir": "apps/repro/test/.storybook"
+      },
+      "configurations": {
+        "ci": {
+          "quiet": true
+        }
+      },
+      "dependsOn": ["prepare"]
+    },
+    "e2e": {
+      "executor": "@nx/cypress:cypress",
+      "options": {
+        "cypressConfig": "apps/repro/test/cypress.config.ts",
+        "testingType": "e2e",
+        "baseUrl": "http://localhost:3000"
+      }
+    },
+    "lint": {
+      "executor": "@nx/linter:eslint",
+      "outputs": ["{options.outputFile}"],
+      "options": {
+        "lintFilePatterns": ["apps/repro/test/**/*.{js,ts}"]
+      }
+    }
+  },
+  "tags": ["apps"]
+}

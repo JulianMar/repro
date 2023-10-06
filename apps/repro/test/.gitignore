@@ -1,0 +1,5 @@
+.nuxt
+.output
+.env
+auto-imports.d.ts
+components.d.ts

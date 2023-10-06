@@ -1,0 +1,170 @@
+include: ci/common.yml
+
+cache:
+  key: 'cache-npm-russmedia-frontend-nuxt3'
+  paths:
+    - .npm/
+    - cache/Cypress
+
+stages:
+  - setup
+  - build
+  - test
+  - deploy
+  - e2e
+
+buildAppImage:
+  extends: .dockerBase
+  needs:
+    - pipeline: $PARENT_PIPELINE_ID
+      job: buildCode
+    - pipeline: $PARENT_PIPELINE_ID
+      job: install-dependencies
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'parent_pipeline'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - !reference [.checkAffected, script]
+
+    - docker build -f
+      .deployment/Dockerfile.app
+      .
+      -t gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA
+      --build-arg CI_COMMIT_REF_SLUG=$CI_COMMIT_REF_SLUG
+      --build-arg APP=$APP
+    - docker push gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA
+
+deployProduction:
+  extends: .deploy
+  allow_failure: true
+  needs:
+    - buildAppImage
+    # - test
+  variables:
+    PROJECT: $PROD_PROJECT
+    CONFIG: $PROD_CONFIG
+    DEPLOYMENT_HOST: $PROD_DEPLOYMENT_HOST
+    DEPLOYMENT_URL: $PROD_DEPLOYMENT_URL
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  script:
+    - !reference [.checkAffected, script]
+
+    - docker pull gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA
+    - docker tag gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT-master:$CI_COMMIT_SHORT_SHA
+    - docker tag gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT-master:latest
+    - docker push gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT-master:$CI_COMMIT_SHORT_SHA
+    - docker push gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT-master:latest
+
+    - mkdir -p ci-templates-gitlab
+    - cp -r /deployment ci-templates-gitlab/
+    - cp -r /templates ci-templates-gitlab/
+
+    - kustomize build ./${DEPLOYMENT_PATH} | envsubst > kustomize.yaml
+    - oc apply --wait=true -f kustomize.yaml > apply-result.yaml
+    # wait for deployment to finish
+    - for app in $(cat apply-result.yaml | awk '/deployment/ {print $1}'); do echo "waiting for $app" && oc wait $app --for condition=available --timeout=300s ; done
+  environment:
+    name: production/$APP
+    url: $DEPLOYMENT_URL
+
+deployDev:
+  extends: .deploy
+  needs:
+    - buildAppImage
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'parent_pipeline'
+      when: manual
+      allow_failure: true
+  variables:
+    PROJECT: $DEV_PROJECT
+    CONFIG: $DEV_CONFIG
+    DEPLOYMENT_HOST: $DEV_DEPLOYMENT_HOST
+    DEPLOYMENT_URL: $DEV_DEPLOYMENT_URL
+    DEPLOYMENT_PATH: .deployment/$APP/dev
+    DEPLOYMENT_NAME: frontend-dev
+    IMAGE_TAG: gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA
+  environment:
+    name: dev/$APP
+    url: $DEPLOYMENT_URL
+    deployment_tier: development
+
+deployReviewApp:
+  extends: .deploy
+  needs:
+    - buildAppImage
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'parent_pipeline'
+  variables:
+    PROJECT: 'russmedia-frontend-ci'
+    DEPLOYMENT_PATH: .deployment/$APP/ci
+    DEPLOYMENT_NAME: $CLIENT-$CI_COMMIT_REF_SLUG
+    DEPLOYMENT_HOST: $DEPLOYMENT_NAME.apps.cl1.openshift.russmedia.digital
+    DEPLOYMENT_URL: 'https://$DEPLOYMENT_NAME.apps.cl1.openshift.russmedia.digital'
+    CONFIG: env-frontend-$CLIENT
+    IMAGE_TAG: gitlab.russmedia.com:5050/devv/russmedia-frontend-nuxt3/app-$CLIENT:$CI_COMMIT_SHORT_SHA
+    API_URL: 'https://$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA.apps.cl1.openshift.russmedia.digital'
+  environment:
+    name: review/$APP/$CI_COMMIT_REF_NAME
+    url: $DEPLOYMENT_URL
+
+preE2eLaendlepunkte:
+  stage: deploy
+  needs:
+    - deployReviewApp
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'parent_pipeline' && $SHOULD_RUN_LP_BEFORE == 'true'
+  variables:
+    DEPLOY_NAME: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+    DEPLOY_HOST: '$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA.apps.cl1.openshift.russmedia.digital'
+  trigger:
+    forward:
+      yaml_variables: true
+    project: devv/russmedia-tee
+    strategy: depend
+
+e2eTests:
+  stage: e2e
+  image: gitlab.russmedia.com:5050/devv/docker-base-images/cypress-browsers:node20
+  needs:
+    - deployReviewApp
+    - job: preE2eLaendlepunkte
+      optional: true
+    - pipeline: $PARENT_PIPELINE_ID
+      job: install-dependencies
+  tags:
+    - test
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == 'parent_pipeline'
+    - exists:
+      - /apps/$APP/cypress.config.ts
+  variables:
+    DEPLOYMENT_NAME: $CLIENT-$CI_COMMIT_REF_SLUG
+    DEPLOYMENT_URL: 'https://$DEPLOYMENT_NAME.apps.cl1.openshift.russmedia.digital'
+  artifacts:
+    when: on_failure
+    paths:
+      - dist/cypress/**/videos
+      - dist/cypress/**/screenshots
+    expire_in: 1 day
+    reports:
+      junit: dist/cypress/**/junit-*.xml
+  script:
+    - export CYPRESS_CACHE_FOLDER="${CI_PROJECT_DIR}/cache/Cypress"
+
+    - FILE=$CI_PROJECT_DIR/apps/$APP/cypress.config.ts
+    - |-
+      if [ ! -f "$FILE" ]; then
+        echo "✔️ no test needed!"
+        exit 0
+      fi
+
+    - !reference [.checkAffected, script]
+
+    - npm ci --cache .npm/ --prefer-offline --no-audit
+
+    - mv ${CI_PROJECT_DIR}/apps/${APP}/cypress/tsconfig.json ${CI_PROJECT_DIR}/apps/${APP}/tsconfig.json
+
+    - npx nx run ${CLIENT}:e2e:ci --baseUrl=${DEPLOYMENT_URL}
+  interruptible: true
